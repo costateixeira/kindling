@@ -6642,7 +6642,7 @@ public class Publisher implements URIResolver, SectionNumberer {
         filesToValidate.put("search-parameters", new ValidationInformation("Bundle"));            
       }
 
-      int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 8));
+      int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 24));
       page.log("Validating "+filesToValidate.size()+" files using "+threadCount+" threads", LogMessageType.Process);
 
       List<String> sortedKeys = Utilities.sortedCaseInsensitive(filesToValidate.keySet());
