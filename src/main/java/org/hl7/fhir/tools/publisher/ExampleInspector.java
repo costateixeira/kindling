@@ -83,6 +83,40 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
     }
   }
 
+  /**
+   * Holds the result of validating a single example, for use with parallel validation.
+   */
+  public static class ValidationResult {
+    private final String name;
+    private final List<ValidationMessage> errors;
+    private final int errorCount;
+    private final int warningCount;
+    private final int informationCount;
+    private final long timeMs;
+    private final long size;
+    private final Element element;
+
+    public ValidationResult(String name, List<ValidationMessage> errors, int errorCount, int warningCount, int informationCount, long timeMs, long size, Element element) {
+      this.name = name;
+      this.errors = errors;
+      this.errorCount = errorCount;
+      this.warningCount = warningCount;
+      this.informationCount = informationCount;
+      this.timeMs = timeMs;
+      this.size = size;
+      this.element = element;
+    }
+
+    public String getName() { return name; }
+    public List<ValidationMessage> getErrors() { return errors; }
+    public int getErrorCount() { return errorCount; }
+    public int getWarningCount() { return warningCount; }
+    public int getInformationCount() { return informationCount; }
+    public long getTimeMs() { return timeMs; }
+    public long getSize() { return size; }
+    public Element getElement() { return element; }
+  }
+
   private class ExampleHostServices implements IHostApplicationServices {
 
     @Override
@@ -358,7 +392,94 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
     }
     Runtime.getRuntime().gc();
   }
- 
+
+  /**
+   * Validate a single example in isolation, returning a ValidationResult.
+   * This method is thread-safe: it uses its own error list and InstanceValidator.
+   * It does NOT call checkSearchParameters or DefinitionsUsageTracker (those are done in applyResult).
+   */
+  public ValidationResult validateIsolated(String n, String rt, StructureDefinition profile) {
+    List<ValidationMessage> localErrors = new ArrayList<>();
+    int localErrorCount = 0;
+    int localWarningCount = 0;
+    int localInfoCount = 0;
+    Element element = null;
+
+    long t = System.currentTimeMillis();
+    try {
+      InstanceValidator localValidator = new InstanceValidator(context, hostServices, null, null, new ValidatorSettings());
+      localValidator.setSuppressLoincSnomedMessages(true);
+      localValidator.setResourceIdRule(IdStatus.REQUIRED);
+      localValidator.setBestPracticeWarningLevel(BestPracticeWarningLevel.Warning);
+      localValidator.getExtensionDomains().add("http://hl7.org/fhir/us");
+      localValidator.setFetcher(this);
+      localValidator.setAllowExamples(true);
+      localValidator.getSettings().setDebug(false);
+      localValidator.setForPublication(true);
+      localValidator.setPolicyAdvisor(new BasePolicyAdvisorForFullValidation(ReferenceValidationPolicy.CHECK_TYPE_IF_EXISTS, new HashSet<>()));
+
+      String jsonFile = Utilities.path(rootDir, n + ".json");
+      element = Manager.parseSingle(context, new CSFileInputStream(jsonFile), FhirFormat.JSON);
+      localValidator.validate(null, localErrors, null, element);
+      if (profile != null) {
+        List<StructureDefinition> list = new ArrayList<>();
+        list.add(profile);
+        localValidator.validate(null, localErrors, null, element, list);
+      }
+    } catch (Exception e) {
+      e.printStackTrace();
+      localErrors.add(new ValidationMessage(Source.InstanceValidator, IssueType.STRUCTURE, -1, -1, n, e.getMessage(), IssueSeverity.ERROR));
+    }
+
+    long size = fileSize(n);
+    t = System.currentTimeMillis() - t;
+
+    for (ValidationMessage m : localErrors) {
+      if (m.getLevel() == IssueSeverity.WARNING)
+        localWarningCount++;
+      else if (m.getLevel() == IssueSeverity.INFORMATION)
+        localInfoCount++;
+      else
+        localErrorCount++;
+    }
+
+    return new ValidationResult(n, localErrors, localErrorCount, localWarningCount, localInfoCount, t, size, element);
+  }
+
+  /**
+   * Apply a ValidationResult from parallel validation: log output, update counters, propagate errors.
+   * Also runs search parameter checks and usage tracking (which modify shared state).
+   * Must be called sequentially (not thread-safe).
+   */
+  public void applyResult(ValidationResult result) {
+    System.out.print(" validate: " + Utilities.padRight(result.getName(), ' ', 50));
+    logger.log(": " +
+        Utilities.padLeft(Long.toString(result.getTimeMs()) + "ms ", ' ', 8) +
+        Utilities.padLeft(Utilities.describeSize(result.getSize()), ' ', 7), LogMessageType.Process);
+
+    errorCount += result.getErrorCount();
+    warningCount += result.getWarningCount();
+    informationCount += result.getInformationCount();
+
+    for (ValidationMessage m : result.getErrors()) {
+      if (!m.getLevel().equals(IssueSeverity.INFORMATION) && !m.getLevel().equals(IssueSeverity.WARNING)) {
+        m.setMessage(result.getName() + ":: " + m.getLocation() + ": " + m.getMessage());
+        errorsExt.add(m);
+        logger.log(m.getMessage() + " [" + m.getMessageId() + "]", LogMessageType.Error);
+      }
+    }
+
+    // Run search parameter checks and usage tracking sequentially
+    if (result.getElement() != null) {
+      try {
+        new DefinitionsUsageTracker(definitions).updateUsage(result.getElement());
+        checkSearchParameters(result.getElement(), result.getElement());
+      } catch (Exception e) {
+        logger.log("Search parameter check failed for " + result.getName() + ": " + e.getMessage(), LogMessageType.Error);
+      }
+    }
+  }
+
   private long fileSize(String n) {
     try {
       return new File(Utilities.path(rootDir, n+".xml")).length();

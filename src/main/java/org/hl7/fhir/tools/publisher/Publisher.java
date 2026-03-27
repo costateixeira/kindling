@@ -62,6 +62,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.ZipEntry;
 
 import javax.xml.XMLConstants;
@@ -6639,29 +6642,43 @@ public class Publisher implements URIResolver, SectionNumberer {
         filesToValidate.put("search-parameters", new ValidationInformation("Bundle"));            
       }
 
-      page.log("Validating "+filesToValidate.size()+" files", LogMessageType.Process);
-      
-      for (String n : Utilities.sortedCaseInsensitive(filesToValidate.keySet())) {
+      int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 8));
+      page.log("Validating "+filesToValidate.size()+" files using "+threadCount+" threads", LogMessageType.Process);
+
+      List<String> sortedKeys = Utilities.sortedCaseInsensitive(filesToValidate.keySet());
+      ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+      Map<String, Future<ExampleInspector.ValidationResult>> futures = new LinkedHashMap<>();
+
+      for (String n : sortedKeys) {
         if (new File(Utilities.path(page.getFolders().rootDir, "publish", n + ".json")).exists()) {
           ValidationInformation vi = filesToValidate.get(n);
-          if (vi.getExample() == null) {
-            ei.validate(n, vi.getResourceName());
-          } else if (vi.getProfile() == null) {
-            ei.validate(n, vi.getResourceName());
-            for (ValidationMessage vm : ei.getErrors()) {
-              vi.getExample().getErrors().add(vm);
-            }
-          } else {
-            ei.validate(n, vi.getResourceName(), vi.getProfile());
-            for (ValidationMessage vm : ei.getErrors()) {
-              vi.getExample().getErrors().add(vm);
-            }
-          }
+          futures.put(n, executor.submit(() -> ei.validateIsolated(n, vi.getResourceName(), vi.getProfile())));
         } else {
           System.out.println("Ignoring File "+n+" because it doesn't exist");
         }
       }
-            
+      executor.shutdown();
+
+      // Collect results sequentially (in sorted order) and apply them
+      for (String n : sortedKeys) {
+        if (futures.containsKey(n)) {
+          try {
+            ExampleInspector.ValidationResult result = futures.get(n).get();
+            ei.applyResult(result);
+
+            // Propagate errors to example if applicable
+            ValidationInformation vi = filesToValidate.get(n);
+            if (vi.getExample() != null) {
+              for (ValidationMessage vm : result.getErrors()) {
+                vi.getExample().getErrors().add(vm);
+              }
+            }
+          } catch (Exception e) {
+            page.log("Validation failed for " + n + ": " + e.getMessage(), LogMessageType.Error);
+          }
+        }
+      }
+
       ei.summarise();
 
       if (buildFlags.get("all") && isGenerate)
