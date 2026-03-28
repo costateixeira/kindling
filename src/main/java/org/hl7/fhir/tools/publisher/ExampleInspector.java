@@ -420,11 +420,25 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
       String jsonFile = Utilities.path(rootDir, n + ".json");
       element = Manager.parseSingle(context, new CSFileInputStream(jsonFile), FhirFormat.JSON);
-      localValidator.validate(null, localErrors, null, element);
-      if (profile != null) {
-        List<StructureDefinition> list = new ArrayList<>();
-        list.add(profile);
-        localValidator.validate(null, localErrors, null, element, list);
+      // The shared IWorkerContext terminology cache is not thread-safe (uses HashMap).
+      // Retry on ConcurrentModificationException to handle cache contention.
+      int maxRetries = 3;
+      for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          localValidator.validate(null, localErrors, null, element);
+          if (profile != null) {
+            List<StructureDefinition> list = new ArrayList<>();
+            list.add(profile);
+            localValidator.validate(null, localErrors, null, element, list);
+          }
+          break;
+        } catch (java.util.ConcurrentModificationException cme) {
+          if (attempt == maxRetries) {
+            throw cme;
+          }
+          localErrors.clear();
+          Thread.sleep(100 * (attempt + 1));
+        }
       }
     } catch (Exception e) {
       e.printStackTrace();
