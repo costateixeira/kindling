@@ -511,6 +511,7 @@ public class Publisher implements URIResolver, SectionNumberer {
   private Bundle dataElements;
   private Bundle externals;
   private boolean noPartialBuild;
+  private boolean parallelValidate;
   private List<Fragment> fragments = new ArrayList<Publisher.Fragment>();
   private Map<String, String> xmls = new HashMap<String, String>();
   private Map<String, String> jsons = new HashMap<String, String>();
@@ -552,6 +553,7 @@ public class Publisher implements URIResolver, SectionNumberer {
     pub.diffProgram = getNamedParam(args, "-diff");
     pub.noSound =  (args.length >= 1 && hasParam(args, "-nosound"));
     pub.noPartialBuild = (args.length >= 1 && hasParam(args, "-nopartial"));
+    pub.parallelValidate = (args.length >= 1 && hasParam(args, "-parallel-validate"));
     if (hasParam(args, "-validation-mode")) {
       pub.validationMode = ValidationMode.fromCode(getNamedParam(args, "-validation-mode"));
     }
@@ -6642,39 +6644,63 @@ public class Publisher implements URIResolver, SectionNumberer {
         filesToValidate.put("search-parameters", new ValidationInformation("Bundle"));            
       }
 
-      int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 24));
-      page.log("Validating "+filesToValidate.size()+" files using "+threadCount+" threads", LogMessageType.Process);
-
       List<String> sortedKeys = Utilities.sortedCaseInsensitive(filesToValidate.keySet());
-      ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-      Map<String, Future<ExampleInspector.ValidationResult>> futures = new LinkedHashMap<>();
 
-      for (String n : sortedKeys) {
-        if (new File(Utilities.path(page.getFolders().rootDir, "publish", n + ".json")).exists()) {
-          ValidationInformation vi = filesToValidate.get(n);
-          futures.put(n, executor.submit(() -> ei.validateIsolated(n, vi.getResourceName(), vi.getProfile())));
-        } else {
-          System.out.println("Ignoring File "+n+" because it doesn't exist");
-        }
-      }
-      executor.shutdown();
+      if (parallelValidate) {
+        int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 24));
+        page.log("Validating "+filesToValidate.size()+" files using "+threadCount+" threads", LogMessageType.Process);
 
-      // Collect results sequentially (in sorted order) and apply them
-      for (String n : sortedKeys) {
-        if (futures.containsKey(n)) {
-          try {
-            ExampleInspector.ValidationResult result = futures.get(n).get();
-            ei.applyResult(result);
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        Map<String, Future<ExampleInspector.ValidationResult>> futures = new LinkedHashMap<>();
 
-            // Propagate errors to example if applicable
+        for (String n : sortedKeys) {
+          if (new File(Utilities.path(page.getFolders().rootDir, "publish", n + ".json")).exists()) {
             ValidationInformation vi = filesToValidate.get(n);
-            if (vi.getExample() != null) {
-              for (ValidationMessage vm : result.getErrors()) {
+            futures.put(n, executor.submit(() -> ei.validateIsolated(n, vi.getResourceName(), vi.getProfile())));
+          } else {
+            System.out.println("Ignoring File "+n+" because it doesn't exist");
+          }
+        }
+        executor.shutdown();
+
+        for (String n : sortedKeys) {
+          if (futures.containsKey(n)) {
+            try {
+              ExampleInspector.ValidationResult result = futures.get(n).get();
+              ei.applyResult(result);
+
+              ValidationInformation vi = filesToValidate.get(n);
+              if (vi.getExample() != null) {
+                for (ValidationMessage vm : result.getErrors()) {
+                  vi.getExample().getErrors().add(vm);
+                }
+              }
+            } catch (Exception e) {
+              page.log("Validation failed for " + n + ": " + e.getMessage(), LogMessageType.Error);
+            }
+          }
+        }
+      } else {
+        page.log("Validating "+filesToValidate.size()+" files", LogMessageType.Process);
+
+        for (String n : sortedKeys) {
+          if (new File(Utilities.path(page.getFolders().rootDir, "publish", n + ".json")).exists()) {
+            ValidationInformation vi = filesToValidate.get(n);
+            if (vi.getExample() == null) {
+              ei.validate(n, vi.getResourceName());
+            } else if (vi.getProfile() == null) {
+              ei.validate(n, vi.getResourceName());
+              for (ValidationMessage vm : ei.getErrors()) {
+                vi.getExample().getErrors().add(vm);
+              }
+            } else {
+              ei.validate(n, vi.getResourceName(), vi.getProfile());
+              for (ValidationMessage vm : ei.getErrors()) {
                 vi.getExample().getErrors().add(vm);
               }
             }
-          } catch (Exception e) {
-            page.log("Validation failed for " + n + ": " + e.getMessage(), LogMessageType.Error);
+          } else {
+            System.out.println("Ignoring File "+n+" because it doesn't exist");
           }
         }
       }
