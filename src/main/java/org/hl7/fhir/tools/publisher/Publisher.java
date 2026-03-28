@@ -511,7 +511,7 @@ public class Publisher implements URIResolver, SectionNumberer {
   private Bundle dataElements;
   private Bundle externals;
   private boolean noPartialBuild;
-  private boolean parallelValidate;
+  private int parallelValidate = 0; // 0 = sequential, >0 = number of threads
   private List<Fragment> fragments = new ArrayList<Publisher.Fragment>();
   private Map<String, String> xmls = new HashMap<String, String>();
   private Map<String, String> jsons = new HashMap<String, String>();
@@ -553,7 +553,10 @@ public class Publisher implements URIResolver, SectionNumberer {
     pub.diffProgram = getNamedParam(args, "-diff");
     pub.noSound =  (args.length >= 1 && hasParam(args, "-nosound"));
     pub.noPartialBuild = (args.length >= 1 && hasParam(args, "-nopartial"));
-    pub.parallelValidate = (args.length >= 1 && hasParam(args, "-parallel-validate"));
+    if (hasParam(args, "-parallel-validate")) {
+      String val = getNamedParam(args, "-parallel-validate");
+      pub.parallelValidate = val != null ? Integer.parseInt(val) : Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
+    }
     if (hasParam(args, "-validation-mode")) {
       pub.validationMode = ValidationMode.fromCode(getNamedParam(args, "-validation-mode"));
     }
@@ -6646,8 +6649,8 @@ public class Publisher implements URIResolver, SectionNumberer {
 
       List<String> sortedKeys = Utilities.sortedCaseInsensitive(filesToValidate.keySet());
 
-      if (parallelValidate) {
-        int threadCount = Math.max(1, Math.min(Runtime.getRuntime().availableProcessors() - 1, 24));
+      if (parallelValidate > 0) {
+        int threadCount = parallelValidate;
         page.log("Validating "+filesToValidate.size()+" files using "+threadCount+" threads", LogMessageType.Process);
 
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
