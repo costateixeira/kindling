@@ -202,6 +202,7 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
   private static final boolean VALIDATE_BY_PROFILE = true;
   private static final boolean VALIDATE_BY_SCHEMATRON = false;
   private static final boolean VALIDATE_BY_JSON_SCHEMA = false;
+  private static final Object SNAPSHOT_LOCK = new Object();
 
   private IWorkerContext context;
   private String rootDir;
@@ -420,16 +421,31 @@ public class ExampleInspector implements IValidatorResourceFetcher, IValidationP
 
       String jsonFile = Utilities.path(rootDir, n + ".json");
       element = Manager.parseSingle(context, new CSFileInputStream(jsonFile), FhirFormat.JSON);
+      // StructureDefinition validation triggers snapshot generation via ProfileUtilities,
+      // which is not thread-safe. Synchronize those to avoid IndexOutOfBoundsException.
+      // Other resource types run fully parallel.
+      boolean needsSnapshotLock = "StructureDefinition".equals(rt);
       // The shared IWorkerContext terminology cache is not thread-safe (uses HashMap).
       // Retry on ConcurrentModificationException to handle cache contention.
       int maxRetries = 3;
       for (int attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          localValidator.validate(null, localErrors, null, element);
-          if (profile != null) {
-            List<StructureDefinition> list = new ArrayList<>();
-            list.add(profile);
-            localValidator.validate(null, localErrors, null, element, list);
+          if (needsSnapshotLock) {
+            synchronized (SNAPSHOT_LOCK) {
+              localValidator.validate(null, localErrors, null, element);
+              if (profile != null) {
+                List<StructureDefinition> list = new ArrayList<>();
+                list.add(profile);
+                localValidator.validate(null, localErrors, null, element, list);
+              }
+            }
+          } else {
+            localValidator.validate(null, localErrors, null, element);
+            if (profile != null) {
+              List<StructureDefinition> list = new ArrayList<>();
+              list.add(profile);
+              localValidator.validate(null, localErrors, null, element, list);
+            }
           }
           break;
         } catch (java.util.ConcurrentModificationException cme) {
